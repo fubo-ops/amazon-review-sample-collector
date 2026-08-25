@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amazon-review-sample-collector"
+version = "0.1.0"
+description = "Cross-platform Amazon review-sample collector and Codex Skill"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "openpyxl>=3.1,<4",
+  "playwright>=1.55,<2",
+]
+
+[project.scripts]
+amazon-review-collector = "scripts.amazon_reviews:main"
+
+[tool.setuptools]
+packages = ["scripts"]

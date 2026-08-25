@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon Review Sample Collector"
+  short_description: "Collect Amazon competitor-review samples without MCP"
+  default_prompt: "Collect and validate an Amazon review sample for the requested ASINs."
