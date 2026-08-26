@@ -1,6 +1,6 @@
 ---
 name: amazon-review-sample-collector
-description: Use when collecting and validating Amazon competitor-review samples for one or more ASINs, especially requests mentioning 批量抓取竞品评论, review VOC, persistent Amazon session, resume, or Excel output.
+description: Use when collecting and validating expanded Amazon competitor-review samples for one or more ASINs, especially requests mentioning 批量抓取竞品评论, 卖家精灵关键词, 二次评论扩量, review VOC, persistent session, resume, or Excel output.
 ---
 
 # Amazon Review Sample Collector
@@ -19,13 +19,15 @@ python scripts/amazon_reviews.py doctor
 python scripts/amazon_reviews.py init-profile
 ```
 
-Use `.venv\Scripts\python.exe` on Windows or `.venv/bin/python` on macOS/Linux when the virtual environment is not activated. Wait for the user to finish Amazon sign-in during `init-profile`.
+Use `.venv\Scripts\python.exe` on Windows or `.venv/bin/python` on macOS/Linux when the virtual environment is not activated. Wait for the user to finish Amazon and SellerSprite sign-in during `init-profile`.
 
 ## Collect
 
 ```bash
 python scripts/amazon_reviews.py rufus --asins ASIN_A ASIN_B --output OUTPUT_DIR
 ```
+
+The default `hybrid` flow runs the original Amazon sample, adds SellerSprite reverse-search terms, and then derives a second set of frequent terms from the enlarged review sample. If SellerSprite is unavailable, continue with the second review-term pass. Use `--expansion second-pass` to skip SellerSprite or `--expansion baseline` to run the original flow only.
 
 Use `--headed` for visible monitoring. Reusing `OUTPUT_DIR` resumes an interrupted run. Use `--restart` only when the user explicitly requests a fresh run.
 

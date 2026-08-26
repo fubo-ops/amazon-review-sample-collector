@@ -16,7 +16,7 @@ python scripts/amazon_reviews.py doctor
 python scripts/amazon_reviews.py init-profile
 ```
 
-完成 Amazon 登录后，使用原输出目录继续运行。
+完成 Amazon 和卖家精灵登录后，使用原输出目录继续运行。若卖家精灵暂时不可用，混合模式会自动使用评论高频词二次扩量。
 
 ## 会话被占用
 

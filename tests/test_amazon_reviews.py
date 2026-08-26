@@ -83,6 +83,48 @@ class RufusParsingTests(unittest.TestCase):
         ]
         self.assertEqual(reviews.rufus_top_terms(rows), ["durable", "brush", "quiet", "easy"])
 
+    def test_seller_keywords_are_parsed_and_existing_queries_are_excluded(self):
+        page_text = """
+        高频词 (点击可查询) 隐藏高频词
+        car (887 16.15%)
+        dog (861 15.68%)
+        booster (116 2.11%)
+        travel (83 1.51%)
+        para (29 0.53%)
+        对比
+        """
+        self.assertEqual(
+            reviews.select_seller_queries(page_text, excluded={"car", "dog"}, limit=3),
+            ["booster", "travel"],
+        )
+
+    def test_seller_keywords_are_parsed_in_english_interface(self):
+        page_text = """
+        Word Frequency (Refresh) Hide Word Frequency (Excluded grammar words like "of", "at")
+        Phrase Count
+        Single word
+        car (943 15.86%)
+        dog (899 15.12%)
+        seat (736 12.38%)
+        booster (106 1.78%)
+        Add All to My List
+        Export Keywords
+        """
+        self.assertEqual(
+            reviews.select_seller_queries(page_text, excluded={"car", "dog"}, limit=2),
+            ["seat", "booster"],
+        )
+
+    def test_second_pass_terms_exclude_completed_queries_and_labels(self):
+        rows = [
+            {"评论标题": "Secure harness", "评论内容": "Search term: secure harness buckle"},
+            {"评论标题": "Harness fit", "评论内容": "Harness buckle fits small dogs"},
+        ]
+        self.assertEqual(
+            reviews.rufus_top_terms(rows, limit=6, excluded={"harness"}),
+            ["buckle", "secure", "dogs", "fit", "fits", "small"],
+        )
+
     def test_checkpoint_resume_and_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)
@@ -148,6 +190,7 @@ class RufusParsingTests(unittest.TestCase):
         parser = reviews.build_parser()
         args = parser.parse_args(["rufus", "--asins", "B000000001", "--output", "out"])
         self.assertEqual(args.session_mode, "persistent")
+        self.assertEqual(args.expansion, "hybrid")
         self.assertTrue(reviews._rufus_launch_plan(args)["persistent"])
         fresh = parser.parse_args([
             "rufus", "--asins", "B000000001", "--session-mode", "fresh", "--output", "out",
@@ -167,6 +210,59 @@ class RufusParsingTests(unittest.TestCase):
 
 
 class RufusBatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hybrid_expansion_uses_seller_then_second_pass(self):
+        calls = []
+
+        async def fetch_html(asin, query):
+            calls.append(query)
+            review_id = query.upper().replace(" ", "-")
+            return {
+                "http_status": 200,
+                "source_url": "https://fixture.test",
+                "capture_time": "now",
+                "html": (
+                    f'<li><a href="/review/{review_id}">review</a>'
+                    f'<span class="askReviewTitle">{query} buckle</span>'
+                    f'<noscript></noscript>{query} buckle secure</li>'
+                ),
+            }
+
+        result = await reviews.run_hybrid_expansion(
+            "B000000001",
+            first_queries=["car"],
+            first_reviews=[{"评论ID": "BASE", "评论标题": "", "评论内容": ""}],
+            seller_queries=["booster"],
+            fetch_html=fetch_html,
+            second_limit=1,
+            batch_size=1,
+        )
+        self.assertEqual(calls[0], "booster")
+        self.assertIn("buckle", calls[1:])
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(len(result["reviews"]), 3)
+
+    async def test_hybrid_expansion_falls_back_when_seller_terms_are_empty(self):
+        calls = []
+
+        async def fetch_html(_asin, query):
+            calls.append(query)
+            return {
+                "http_status": 200, "source_url": "https://fixture.test", "capture_time": "now",
+                "html": f'<li><a href="/review/{query.upper()}">review</a><span class="askReviewTitle">{query}</span><noscript></noscript>body</li>',
+            }
+
+        result = await reviews.run_hybrid_expansion(
+            "B000000001",
+            first_queries=["car"],
+            first_reviews=[{"评论ID": "BASE", "评论标题": "secure buckle", "评论内容": "secure buckle"}],
+            seller_queries=[],
+            fetch_html=fetch_html,
+            second_limit=1,
+            batch_size=1,
+        )
+        self.assertEqual(calls, ["buckle"])
+        self.assertEqual(result["status"], "complete")
+
     async def test_resume_batches_and_deduplicates(self):
         calls, checkpoints = [], []
         active = max_active = 0

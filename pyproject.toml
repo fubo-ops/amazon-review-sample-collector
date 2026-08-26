@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amazon-review-sample-collector"
-version = "0.1.0"
-description = "Cross-platform Amazon review-sample collector and Codex Skill"
+version = "0.2.0"
+description = "Cross-platform hybrid Amazon review-sample collector and Codex Skill"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [

@@ -34,6 +34,7 @@ MONTH_DATE_RE = re.compile(
 )
 RUFUS_BASE_URL = "https://www.amazon.com/rufus/web/askSearch"
 RUFUS_START_URL = "https://www.amazon.com/rd/uedata?"
+SELLERSPRITE_REVERSE_URL = "https://www.sellersprite.com/v3/keyword-reverse/"
 RUFUS_STOPWORDS = {
     "a", "about", "after", "all", "also", "am", "an", "and", "any", "are", "as", "at", "be", "because",
     "been", "but", "by", "can", "could", "did", "do", "does", "for", "from", "get", "got", "had", "has",
@@ -43,6 +44,13 @@ RUFUS_STOPWORDS = {
     "to", "too", "up", "use", "used", "very", "was", "we", "were", "what", "when", "which", "who", "will",
     "with", "would", "you", "your",
 }
+EXPANSION_NOISE = {
+    "amazon", "item", "items", "other", "others", "product", "products", "review", "reviews",
+    "search", "term", "terms", "thing", "things", "para", "perro", "perros", "coche", "el",
+}
+SELLER_TERM_RE = re.compile(r"(?mi)^[ \t]*([a-z0-9][a-z0-9/-]*)\s+\(([\d,]+)[^)]*\)")
+
+
 def default_profile_dir() -> Path:
     return Path.home() / ".amazon-review-collector" / "amazon-profile"
 
@@ -316,12 +324,40 @@ def parse_rufus_html(
     return rows
 
 
-def rufus_top_terms(rows: Iterable[dict[str, Any]], limit: int = 30) -> list[str]:
+def rufus_top_terms(
+    rows: Iterable[dict[str, Any]],
+    limit: int = 30,
+    excluded: Iterable[str] = (),
+) -> list[str]:
+    blocked = RUFUS_STOPWORDS | EXPANSION_NOISE | {word.lower() for word in excluded}
     counts: Counter[str] = Counter()
     for row in rows:
         text = f"{row.get('评论标题', '')} {row.get('评论内容', '')}".lower()
-        counts.update(word for word in re.findall(r"[a-z][a-z'-]*", text) if word not in RUFUS_STOPWORDS and len(word) > 1)
+        counts.update(word for word in re.findall(r"[a-z][a-z'-]*", text) if word not in blocked and len(word) > 1)
     return [word for word, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+
+
+def select_seller_queries(text: str, excluded: Iterable[str] = (), limit: int = 30) -> list[str]:
+    starts = [position for marker in ("高频词", "Word Frequency") if (position := text.find(marker)) >= 0]
+    start = min(starts) if starts else -1
+    if start < 0:
+        return []
+    ends = [
+        position for marker in ("\n对比", "\nAdd All to My List", "\nExport Keywords")
+        if (position := text.find(marker, start)) > start
+    ]
+    section = text[start:min(ends) if ends else None]
+    blocked = EXPANSION_NOISE | {word.lower() for word in excluded}
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in SELLER_TERM_RE.finditer(section):
+        word = match.group(1).lower()
+        if word not in blocked and word not in seen:
+            result.append(word)
+            seen.add(word)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _rufus_stop_reason(status: int, html: str, url: str = "") -> str:
@@ -393,6 +429,133 @@ async def run_rufus_queries(
     return result
 
 
+def _ordered_unique(values: Iterable[str], included: set[str] | None = None) -> list[str]:
+    allowed = included if included is not None else set(values)
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in allowed and value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+async def run_hybrid_expansion(
+    asin: str,
+    *,
+    first_queries: list[str],
+    first_reviews: Iterable[dict[str, Any]],
+    seller_queries: list[str],
+    fetch_html: Any,
+    second_limit: int = 30,
+    batch_size: int = 6,
+    completed_queries: set[str] | None = None,
+    second_queries: list[str] | None = None,
+    on_batch: Any = None,
+) -> dict[str, Any]:
+    """Expand an existing sample with seller terms, then terms found in the enlarged sample."""
+    completed = set(completed_queries or ()) | set(first_queries)
+    reviews = list(first_reviews)
+    seller_terms = [term for term in seller_queries if term not in completed]
+
+    def notify(phase: str, snapshot: dict[str, Any], derived: list[str]) -> None:
+        if on_batch:
+            snapshot_completed = completed | set(snapshot.get("completed_queries") or [])
+            on_batch({
+                **snapshot,
+                "phase": phase,
+                "completed_queries": _ordered_unique(
+                    [*first_queries, *seller_queries, *derived], snapshot_completed
+                ),
+                "seller_queries": seller_queries,
+                "second_queries": derived,
+            })
+
+    if seller_terms:
+        seller_result = await run_rufus_queries(
+            asin,
+            seller_terms,
+            fetch_html=fetch_html,
+            batch_size=batch_size,
+            completed_queries=completed,
+            existing_reviews=reviews,
+            on_batch=lambda snapshot: notify("seller", snapshot, []),
+        )
+        reviews = seller_result["reviews"]
+        completed.update(seller_result["completed_queries"])
+        if seller_result["stopped"]:
+            return {
+                "reviews": reviews,
+                "completed_queries": _ordered_unique([*first_queries, *seller_queries], completed),
+                "seller_queries": seller_queries,
+                "second_queries": [],
+                "status": "blocked",
+                "stopped": True,
+                "stop_reason": seller_result["stop_reason"],
+            }
+
+    if second_queries is None:
+        second_queries = rufus_top_terms(
+            reviews,
+            limit=second_limit,
+            excluded=completed | set(seller_queries),
+        )
+    else:
+        second_queries = list(second_queries)
+    second_terms = [term for term in second_queries if term not in completed]
+    second_result = await run_rufus_queries(
+        asin,
+        second_terms,
+        fetch_html=fetch_html,
+        batch_size=batch_size,
+        completed_queries=completed,
+        existing_reviews=reviews,
+        on_batch=lambda snapshot: notify("second", snapshot, second_queries or []),
+    )
+    reviews = second_result["reviews"]
+    completed.update(second_result["completed_queries"])
+    stopped = bool(second_result["stopped"])
+    return {
+        "reviews": reviews,
+        "completed_queries": _ordered_unique(
+            [*first_queries, *seller_queries, *(second_queries or [])], completed
+        ),
+        "seller_queries": seller_queries,
+        "second_queries": second_queries or [],
+        "status": "blocked" if stopped else "complete",
+        "stopped": stopped,
+        "stop_reason": second_result["stop_reason"],
+    }
+
+
+async def collect_seller_queries(
+    page: Any,
+    asin: str,
+    *,
+    excluded: Iterable[str] = (),
+    limit: int = 30,
+    timeout_ms: int = 20000,
+) -> list[str]:
+    """Read reverse-search terms from the signed-in seller research page."""
+    url = f"{SELLERSPRITE_REVERSE_URL}?{urlencode({'q': asin, 'marketId': 1})}"
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        button = page.get_by_role("button", name="立即查询", exact=True)
+        if await button.count():
+            await button.first.click(timeout=min(timeout_ms, 5000))
+        deadline = time.monotonic() + timeout_ms / 1000
+        last_terms: list[str] = []
+        while time.monotonic() < deadline:
+            text = await page.locator("body").inner_text(timeout=min(timeout_ms, 5000))
+            last_terms = select_seller_queries(text, excluded=excluded, limit=limit)
+            if last_terms:
+                return last_terms
+            await asyncio.sleep(1)
+        return last_terms
+    except Exception:
+        return []
+
+
 async def _rufus_page_fetch(page: Any, asin: str, query: str, timeout_ms: int) -> dict[str, Any]:
     params = {
         "isBlue": "true",
@@ -454,7 +617,10 @@ def _checkpoint_state(state: dict[str, Any]) -> dict[str, Any]:
         "status": str(state.get("status") or "running"),
         "stop_reason": _public_reason(str(state.get("stop_reason") or "")),
         "seed_complete": bool(state.get("seed_complete")),
+        "expansion": str(state.get("expansion") or "hybrid"),
         "top30": list(state.get("top30") or []),
+        "seller_queries": list(state.get("seller_queries") or []),
+        "second_queries": list(state.get("second_queries") or []),
         "completed_queries": list(state.get("completed_queries") or []),
         "reviews": [_public_review(row) for row in state.get("reviews") or []],
     }
@@ -564,9 +730,11 @@ async def init_profile(args: argparse.Namespace) -> dict[str, Any]:
         context = await playwright.chromium.launch_persistent_context(
             str(profile_dir), locale="en-US", **launch
         )
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto("https://www.amazon.com/", wait_until="domcontentloaded", timeout=args.timeout_ms)
-        print("Amazon 已打开。请在浏览器中完成登录，然后回到终端按 Enter 保存此专用 Profile。")
+        amazon_page = context.pages[0] if context.pages else await context.new_page()
+        seller_page = await context.new_page()
+        await amazon_page.goto("https://www.amazon.com/", wait_until="domcontentloaded", timeout=args.timeout_ms)
+        await seller_page.goto(SELLERSPRITE_REVERSE_URL, wait_until="domcontentloaded", timeout=args.timeout_ms)
+        print("Amazon 和卖家精灵已分别打开。请在两个标签页完成登录，然后回到终端按 Enter 保存此专用 Profile。")
         await asyncio.to_thread(input)
         await context.close()
     return {"status": "initialized"}
@@ -614,6 +782,8 @@ async def collect_rufus_reviews(args: argparse.Namespace) -> dict[str, Any]:
 
         async def collect_asin(asin: str) -> tuple[str, dict[str, Any]]:
             saved = checkpoint["asins"].get(asin, {})
+            if saved and saved.get("expansion", "baseline") != args.expansion:
+                saved = {}
             if saved.get("status") == "complete":
                 return asin, saved
 
@@ -662,6 +832,9 @@ async def collect_rufus_reviews(args: argparse.Namespace) -> dict[str, Any]:
                         resumed_reviews.setdefault(row["评论ID"], row)
                     base_state = {
                         "asin": asin, "seed_complete": not bool(seed_reason), "top30": terms,
+                        "expansion": args.expansion,
+                        "seller_queries": list(saved.get("seller_queries") or []),
+                        "second_queries": list(saved.get("second_queries") or []),
                         "completed_queries": list(saved.get("completed_queries") or []),
                         "reviews": list(resumed_reviews.values()), "stopped": bool(seed_reason),
                         "stop_reason": seed_reason, "status": "blocked" if seed_reason else "running",
@@ -690,14 +863,71 @@ async def collect_rufus_reviews(args: argparse.Namespace) -> dict[str, Any]:
                         existing_reviews=base_state["reviews"],
                         on_batch=checkpoint_batch,
                     )
+                    first_completed = set(base_state["completed_queries"]) | set(query_result["completed_queries"])
                     stop_reason = query_result["stop_reason"]
+                    if stop_reason or args.expansion == "baseline":
+                        final = {
+                            **base_state,
+                            "completed_queries": _ordered_unique(
+                                [*base_state["completed_queries"], *terms], first_completed
+                            ),
+                            "reviews": query_result["reviews"],
+                            "stopped": bool(stop_reason),
+                            "stop_reason": stop_reason,
+                            "status": "blocked" if stop_reason else "complete",
+                        }
+                        save_state(asin, final)
+                        return asin, final
+
+                    seller_terms = list(saved.get("seller_queries") or [])
+                    if args.expansion == "hybrid" and not seller_terms:
+                        seller_page = await context.new_page()
+                        try:
+                            seller_terms = await collect_seller_queries(
+                                seller_page,
+                                asin,
+                                excluded=first_completed,
+                                limit=args.seller_term_limit,
+                                timeout_ms=args.seller_timeout_ms,
+                            )
+                        finally:
+                            await seller_page.close()
+
+                    second_saved = list(saved.get("second_queries") or []) or None
+
+                    def checkpoint_expansion(snapshot: dict[str, Any]) -> None:
+                        save_state(asin, {
+                            **base_state,
+                            "seller_queries": snapshot.get("seller_queries") or seller_terms,
+                            "second_queries": snapshot.get("second_queries") or [],
+                            "completed_queries": snapshot["completed_queries"],
+                            "reviews": snapshot["reviews"],
+                            "stopped": snapshot["stopped"],
+                            "stop_reason": snapshot["stop_reason"],
+                            "status": "blocked" if snapshot["stopped"] else "running",
+                        })
+
+                    expanded = await run_hybrid_expansion(
+                        asin,
+                        first_queries=terms,
+                        first_reviews=query_result["reviews"],
+                        seller_queries=seller_terms,
+                        fetch_html=fetch_html,
+                        second_limit=args.second_term_limit,
+                        batch_size=min(6, args.concurrency),
+                        completed_queries=first_completed,
+                        second_queries=second_saved,
+                        on_batch=checkpoint_expansion,
+                    )
                     final = {
                         **base_state,
-                        "completed_queries": query_result["completed_queries"],
-                        "reviews": query_result["reviews"],
-                        "stopped": bool(stop_reason),
-                        "stop_reason": stop_reason,
-                        "status": "blocked" if stop_reason else "complete",
+                        "seller_queries": expanded["seller_queries"],
+                        "second_queries": expanded["second_queries"],
+                        "completed_queries": expanded["completed_queries"],
+                        "reviews": expanded["reviews"],
+                        "stopped": expanded["stopped"],
+                        "stop_reason": expanded["stop_reason"],
+                        "status": expanded["status"],
                     }
                     save_state(asin, final)
                     return asin, final
@@ -730,6 +960,10 @@ def build_parser() -> argparse.ArgumentParser:
     rufus.add_argument("--headed", action="store_true")
     rufus.add_argument("--asin-workers", type=int, default=2)
     rufus.add_argument("--concurrency", type=int, default=6)
+    rufus.add_argument("--expansion", choices=("hybrid", "second-pass", "baseline"), default="hybrid")
+    rufus.add_argument("--seller-term-limit", type=int, default=30)
+    rufus.add_argument("--second-term-limit", type=int, default=30)
+    rufus.add_argument("--seller-timeout-ms", type=int, default=20000)
     rufus.add_argument("--restart", action="store_true")
     rufus.add_argument("--timeout-ms", type=int, default=30000)
     rufus.add_argument("--output", required=True)
