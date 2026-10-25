@@ -9,9 +9,9 @@
 
 ## 项目简介
 
-`amazon-review-sample-collector` 是可独立运行、也可作为 Codex Skill 使用的 Amazon US 竞品评论样本采集器。默认结合 Amazon 多关键词查询、卖家精灵反查词和评论高频词二次扩量，按 ASIN 与评论 ID 去重后输出 Excel、CSV 和 JSON。
+`amazon-review-sample-collector` 是可独立运行、也可作为 Codex Skill（Codex 技能包）使用的 Amazon US 竞品评论样本采集器。默认结合 Amazon 多关键词查询、卖家精灵反查词和评论高频词二次扩量（扩大样本量），按 ASIN 与评论 ID 去重后输出 Excel、CSV 和 JSON。
 
-仓库只做采集、去重和校验：结果是多关键词召回的评论样本，不代表商品的全部评论，也不能拿来推算全量评论的精确占比；不导出任何浏览器凭据，也不做语义分析。
+仓库只做采集、去重和校验：结果是多关键词检索到的评论样本，不代表商品的全部评论，也不能拿来推算全量评论的精确占比；不导出任何浏览器凭据，也不做语义分析。
 
 ## 核心功能
 
@@ -151,15 +151,15 @@ amazon-review-sample-collector/
 
 ### Phase 1: 采集链路
 
-- ✅ 批量 ASIN 与 Rufus 评论取样
-- ✅ hybrid / second-pass / baseline 三种扩量模式
+- ✅ 批量 ASIN 与 Rufus（亚马逊站内购物助手）评论取样
+- ✅ 三种扩量模式：hybrid（混合扩量）、second-pass（仅评论词二次扩量）、baseline（仅基础查询）
 - ✅ 卖家精灵不可用时降级继续
 
 ### Phase 2: 会话与恢复
 
 - ✅ 专用浏览器资料目录保存登录会话
 - ✅ 同一输出目录中断续跑
-- ✅ `checkpoint.json` 保留与清理
+- ✅ `checkpoint.json`（断点文件）保留与清理
 
 ### Phase 3: 输出与校验
 
