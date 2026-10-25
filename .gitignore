@@ -23,3 +23,13 @@ checkpoint.json
 SingletonCookie
 SingletonLock
 SingletonSocket
+
+# Generated reports also stay local when --output points outside outputs/
+.runtime/
+*_raw.json
+*.xlsx
+评论合并.csv
+汇总.json
+采集日志.log
+采集说明.md
+.DS_Store
